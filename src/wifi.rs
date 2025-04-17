@@ -21,8 +21,10 @@ pub fn configure_wifi_mixed_mode() -> anyhow::Result<Box<EspWifi<'static>>> {
     // 配置混合模式 (Configure mixed mode)
     let client_ssid: heapless::String<32> = heapless::String::try_from("你的WiFi名称").unwrap();
     let client_pass: heapless::String<64> = heapless::String::try_from("你的WiFi密码").unwrap();
-    let ap_ssid: heapless::String<32> = heapless::String::try_from("ESP32热点").unwrap();
+    let ap_ssid: heapless::String<32> = heapless::String::try_from("ESP32-AP").unwrap();
     let ap_pass: heapless::String<64> = heapless::String::try_from("password123").unwrap();
+
+    info!("Setting up WiFi AP with SSID: {}", ap_ssid);
 
     wifi.set_configuration(&Configuration::Mixed(
         ClientConfiguration {
@@ -35,18 +37,25 @@ pub fn configure_wifi_mixed_mode() -> anyhow::Result<Box<EspWifi<'static>>> {
             ssid: ap_ssid,
             password: ap_pass,
             auth_method: AuthMethod::WPA2Personal,
-            channel: 1,
-            max_connections: 4,
+            channel: 6,  // Use channel 6 for better compatibility
+            max_connections: 10,
             ..Default::default()
         },
     ))?;
 
+    // Start WiFi
     wifi.start()?;
     info!("WiFi started");
 
+    // Wait a bit for WiFi to initialize
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Connect to client network if in mixed mode
     if let Configuration::Mixed(_, _) = wifi.get_configuration()? {
-        wifi.connect()?;
-        info!("WiFi client connected");
+        match wifi.connect() {
+            Ok(_) => info!("WiFi client connected"),
+            Err(e) => info!("WiFi client connection failed: {:?} (continuing in AP-only mode)", e),
+        };
     }
 
     info!("WiFi混合模式已配置 (WiFi mixed mode configured)");
@@ -54,6 +63,10 @@ pub fn configure_wifi_mixed_mode() -> anyhow::Result<Box<EspWifi<'static>>> {
     // Print the AP IP address for connecting to the TCP server
     if let Some(ap_info) = wifi.ap_netif().get_ip_info().ok() {
         info!("AP IP address: {}", ap_info.ip);
+        info!("Connect to WiFi SSID 'ESP32-AP' with password 'password123'");
+        info!("Then connect to TCP server at {}:8080", ap_info.ip);
+    } else {
+        info!("Failed to get AP IP address. Check WiFi configuration.");
     }
 
     Ok(wifi)

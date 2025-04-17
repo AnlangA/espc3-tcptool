@@ -4,9 +4,12 @@ use esp_idf_hal::prelude::*;
 use esp_idf_hal::delay::BLOCK;
 use esp_idf_hal::peripheral::Peripheral;
 use log::{info, error};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use anyhow;
+
+use crate::tcp_client_manager::TcpClientManager;
 
 pub struct UartManager {
     uart: UartDriver<'static>,
@@ -80,13 +83,13 @@ impl UartManager {
         }
     }
 
-    // 启动UART回显服务
-    pub fn start_echo_service(mut self) -> anyhow::Result<()> {
+    // 启动UART转发服务，将数据发送到TCP客户端
+    pub fn start_uart_forwarding(mut self, client_manager: Arc<TcpClientManager>) -> anyhow::Result<()> {
         thread::spawn(move || {
             let mut buffer = [0u8; 256];
 
             loop {
-                // 使用修改后的receive_data方法，它会处理超时错误
+                // 使用非阻塞模式读取数据
                 if let Ok(len) = self.receive_data(&mut buffer) {
                     if len > 0 {
                         // 打印收到的数据
@@ -103,15 +106,13 @@ impl UartManager {
                             .collect();
                         info!("UART received (hex): {}", hex_str);
 
-                        // 回显数据
-                        if let Err(e) = self.send_data(&buffer[0..len]) {
-                            error!("UART echo error: {:?}", e);
-                        }
+                        // 将数据发送到所有TCP客户端
+                        client_manager.broadcast(&buffer[0..len]);
                     }
                     // 如果len为0，表示没有数据，不需要做任何处理
                 } else {
                     // 其他非超时错误仍然记录
-                    error!("UART receive error in echo service");
+                    error!("UART receive error in forwarding service");
                 }
 
                 // 短暂休眠，避免CPU占用过高
@@ -119,19 +120,22 @@ impl UartManager {
             }
         });
 
-        info!("UART echo service started with data printing");
+        info!("UART to TCP forwarding service started");
         Ok(())
     }
 }
 
-// 初始化UART并启动回显服务
-pub fn initialize_uart_echo(
+// 初始化UART并启动转发服务
+pub fn initialize_uart_forwarding(
     uart: impl Peripheral<P = esp_idf_hal::uart::UART1> + 'static,
     tx_pin: impl Peripheral<P = impl gpio::OutputPin> + 'static,
     rx_pin: impl Peripheral<P = impl gpio::InputPin> + 'static,
     baudrate: u32,
+    client_manager: Arc<TcpClientManager>,
 ) -> anyhow::Result<()> {
+    // 使用从主函数传递的共享客户端管理器
+
     let uart_manager = UartManager::new(uart, tx_pin, rx_pin, baudrate)?;
-    uart_manager.start_echo_service()?;
+    uart_manager.start_uart_forwarding(client_manager)?;
     Ok(())
 }
