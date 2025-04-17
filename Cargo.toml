@@ -28,5 +28,6 @@ esp-idf-svc = { version = "0.51", features = ["critical-section", "embassy-time-
 esp-idf-hal = "0.45.2"
 esp-idf-sys = "0.36.1"
 anyhow = "1.0"
+heapless = "0.8.0"
 [build-dependencies]
 embuild = "0.33"

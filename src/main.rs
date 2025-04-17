@@ -1,55 +1,73 @@
-use anyhow::Result;
-use esp_idf_hal::prelude::*;
 use esp_idf_svc::{
-    eventloop::EspSystemEventLoop,
+    wifi::{AccessPointConfiguration, AuthMethod, ClientConfiguration, Configuration, EspWifi},
     nvs::EspDefaultNvsPartition,
-    wifi::BlockingWifi,
+    eventloop::EspSystemEventLoop,
 };
-use esp_idf_sys;
-use std::time::Duration;
 
+use esp_idf_sys as _; // If using the `binstart` feature of `esp-idf-sys`, always keep this module imported
+use log::info;
 
-
-fn main() -> Result<()> {
-    // 初始化ESP32
+fn main() -> anyhow::Result<()> {
+    // Initialize the ESP-IDF system
     esp_idf_sys::link_patches();
+
+    // Configure logging
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    // 设置WiFi
-    let sysloop = EspSystemEventLoop::take()?;
-    let nvs = EspDefaultNvsPartition::take()?;
-    let peripherals = Peripherals::take().unwrap();
-    let mut wifi = BlockingWifi::wrap(
-        esp_idf_svc::wifi::EspWifi::new(peripherals.modem, sysloop.clone(), Some(nvs))?,
-        sysloop,
-    )?;
+    // Configure WiFi in mixed mode
+    let _wifi = configure_wifi_mixed_mode()?;
 
-    // 配置WiFi为STA模式
-    let wifi_configuration = wifi.wifi_mut().get_configuration()?;
-    wifi.wifi_mut().set_configuration(&wifi_configuration)?;
-    wifi.start()?;
-    println!("WiFi已启动为STA模式");
-
-    println!("WiFi已准备就绪");
-
-    // 主循环：发送数据
-    let mut counter = 0;
+    // Keep the program running
     loop {
-        counter += 1;
-        let message = format!("ESP32数据，计数: {}", counter);
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        info!("ESP32 is running...");
+    }
+}
 
-        println!("正在发送: {}", message);
+fn configure_wifi_mixed_mode() -> anyhow::Result<Box<EspWifi<'static>>> {
+    let nvs = EspDefaultNvsPartition::take()?;
+    let sysloop = EspSystemEventLoop::take()?;
 
-        // 这里可以添加其他通信方式的代码
-        // 目前只打印消息到控制台
-        println!("消息已准备: {}", message);
+    // Create WiFi driver
+    let modem = unsafe { esp_idf_svc::hal::modem::Modem::new() };
+    let mut wifi = Box::new(EspWifi::new(
+        modem,
+        sysloop.clone(),
+        Some(nvs)
+    )?);
 
-        // 等待一秒
-        std::thread::sleep(Duration::from_secs(1));
+    // 配置混合模式 (Configure mixed mode)
+    let client_ssid: heapless::String<32> = heapless::String::try_from("无常道心").unwrap();
+    let client_pass: heapless::String<64> = heapless::String::try_from("houbo19990923").unwrap();
+    let ap_ssid: heapless::String<32> = heapless::String::try_from("ESP32热点").unwrap();
+    let ap_pass: heapless::String<64> = heapless::String::try_from("password123").unwrap();
+
+    wifi.set_configuration(&Configuration::Mixed(
+        ClientConfiguration {
+            ssid: client_ssid,
+            password: client_pass,
+            auth_method: AuthMethod::WPA2Personal,
+            ..Default::default()
+        },
+        AccessPointConfiguration {
+            ssid: ap_ssid,
+            password: ap_pass,
+            auth_method: AuthMethod::WPA2Personal,
+            channel: 1,
+            max_connections: 4,
+            ..Default::default()
+        },
+    ))?;
+
+    wifi.start()?;
+    info!("WiFi started");
+
+    if let Configuration::Mixed(_, _) = wifi.get_configuration()? {
+        wifi.connect()?;
+        info!("WiFi client connected");
     }
 
-    // 这部分代码不会执行，因为上面有无限循环
-    // 但我们保留它作为参考
-    #[allow(unreachable_code)]
-    Ok(())
+    info!("WiFi混合模式已配置 (WiFi mixed mode configured)");
+
+    Ok(wifi)
 }
