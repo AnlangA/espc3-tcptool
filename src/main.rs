@@ -28,25 +28,28 @@ fn main() -> anyhow::Result<()> {
     let client_manager = create_tcp_client_manager();
     info!("Created shared TCP client manager");
 
-    // Start TCP server in a separate thread with the shared client manager
-    let server_client_manager = Arc::clone(&client_manager);
-    thread::spawn(move || {
-        if let Err(e) = run_tcp_server(server_client_manager) {
-            error!("TCP server error: {:?}", e);
-        }
-    });
-
-    // Give TCP server time to start
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
     // 初始化UART1 (TX:GPIO21, RX:GPIO20, 波特率:115200)
-    initialize_uart_forwarding(
+    // 并获取共享的UART管理器
+    let uart_manager = initialize_uart_forwarding(
         peripherals.uart1,
         peripherals.pins.gpio21,
         peripherals.pins.gpio20,
         115_200, // 波特率设置为115200
         Arc::clone(&client_manager) // 传递共享的客户端管理器
     )?;
+    info!("UART initialized and forwarding service started");
+
+    // Start TCP server in a separate thread with the shared client manager and UART manager
+    let server_client_manager = Arc::clone(&client_manager);
+    let server_uart_manager = Arc::clone(&uart_manager);
+    thread::spawn(move || {
+        if let Err(e) = run_tcp_server(server_client_manager, server_uart_manager) {
+            error!("TCP server error: {:?}", e);
+        }
+    });
+
+    // Give TCP server time to start
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     info!("ESP32 is running with TCP server and UART service (forwarding UART data to TCP clients)...");
 

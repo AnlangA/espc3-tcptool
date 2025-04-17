@@ -6,9 +6,10 @@ use std::thread;
 use anyhow;
 
 use crate::tcp_client_manager::TcpClientManager;
+use crate::uart::UartManager;
 
-pub fn run_tcp_server(client_manager: Arc<TcpClientManager>) -> anyhow::Result<()> {
-    // Use the shared client manager passed from main
+pub fn run_tcp_server(client_manager: Arc<TcpClientManager>, uart_manager: Arc<UartManager>) -> anyhow::Result<()> {
+    // Use the shared client manager and UART manager passed from main
 
     // Create a TCP listener bound to all interfaces (0.0.0.0)
     let listener = TcpListener::bind("0.0.0.0:8080")?;
@@ -26,9 +27,12 @@ pub fn run_tcp_server(client_manager: Arc<TcpClientManager>) -> anyhow::Result<(
                 // Clone the client manager for this thread
                 let client_manager = Arc::clone(&client_manager);
 
+                // Clone the UART manager for this thread
+                let client_uart_manager = Arc::clone(&uart_manager);
+
                 // Handle each client in a new thread
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, client_manager) {
+                    if let Err(e) = handle_client(stream, client_manager, client_uart_manager) {
                         error!("Error handling client: {:?}", e);
                     }
                 });
@@ -42,7 +46,7 @@ pub fn run_tcp_server(client_manager: Arc<TcpClientManager>) -> anyhow::Result<(
     Ok(())
 }
 
-fn handle_client(stream: TcpStream, client_manager: Arc<TcpClientManager>) -> anyhow::Result<()> {
+fn handle_client(stream: TcpStream, client_manager: Arc<TcpClientManager>, uart_manager: Arc<UartManager>) -> anyhow::Result<()> {
     let peer_addr = stream.peer_addr()?;
     info!("New client connected: {}", peer_addr);
 
@@ -98,6 +102,15 @@ fn handle_client(stream: TcpStream, client_manager: Arc<TcpClientManager>) -> an
             Ok(n) => {
                 // Log received data from client
                 info!("Received {} bytes from {}", n, peer_addr);
+
+                // 将收到的数据发送到UART
+                if n > 0 {
+                    if let Err(e) = uart_manager.send_data(&buffer[0..n]) {
+                        error!("Error sending data to UART: {:?}", e);
+                    } else {
+                        info!("Sent {} bytes from TCP client to UART", n);
+                    }
+                }
             }
             Err(e) => {
                 // 检查是否是“暂时没有数据可读”的错误

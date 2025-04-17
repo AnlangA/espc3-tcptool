@@ -4,7 +4,7 @@ use esp_idf_hal::prelude::*;
 use esp_idf_hal::delay::BLOCK;
 use esp_idf_hal::peripheral::Peripheral;
 use log::{info, error};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use anyhow;
@@ -12,7 +12,7 @@ use anyhow;
 use crate::tcp_client_manager::TcpClientManager;
 
 pub struct UartManager {
-    uart: UartDriver<'static>,
+    uart: Mutex<UartDriver<'static>>,
 }
 
 impl UartManager {
@@ -37,20 +37,22 @@ impl UartManager {
 
         info!("UART1 initialized with TX:GPIO21, RX:GPIO20, baudrate: {}", baudrate);
 
-        Ok(Self { uart })
+        Ok(Self { uart: Mutex::new(uart) })
     }
 
     // 发送数据
-    pub fn send_data(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        self.uart.write(data)?;
+    pub fn send_data(&self, data: &[u8]) -> anyhow::Result<()> {
+        let uart = self.uart.lock().unwrap();
+        uart.write(data)?;
         info!("UART sent {} bytes", data.len());
         Ok(())
     }
 
     // 接收数据 (非阻塞)
-    pub fn receive_data(&mut self, buffer: &mut [u8]) -> anyhow::Result<usize> {
+    pub fn receive_data(&self, buffer: &mut [u8]) -> anyhow::Result<usize> {
         // 使用非阻塞模式读取数据
-        match self.uart.read(buffer, 0) {
+        let uart = self.uart.lock().unwrap();
+        match uart.read(buffer, 0) {
             Ok(len) => Ok(len),
             Err(e) => {
                 // 检查错误类型，如果是超时错误，则不记录日志
@@ -68,8 +70,9 @@ impl UartManager {
     }
 
     // 接收数据 (阻塞)
-    pub fn receive_data_blocking(&mut self, buffer: &mut [u8]) -> anyhow::Result<usize> {
-        match self.uart.read(buffer, BLOCK) {
+    pub fn receive_data_blocking(&self, buffer: &mut [u8]) -> anyhow::Result<usize> {
+        let uart = self.uart.lock().unwrap();
+        match uart.read(buffer, BLOCK) {
             Ok(len) => Ok(len),
             Err(e) => {
                 // 即使在阻塞模式下，也可能出现超时
@@ -84,13 +87,15 @@ impl UartManager {
     }
 
     // 启动UART转发服务，将数据发送到TCP客户端
-    pub fn start_uart_forwarding(mut self, client_manager: Arc<TcpClientManager>) -> anyhow::Result<()> {
+    pub fn start_uart_forwarding(self_arc: Arc<Self>, client_manager: Arc<TcpClientManager>) -> anyhow::Result<()> {
+        let uart_manager = Arc::clone(&self_arc);
+
         thread::spawn(move || {
             let mut buffer = [0u8; 256];
 
             loop {
                 // 使用非阻塞模式读取数据
-                if let Ok(len) = self.receive_data(&mut buffer) {
+                if let Ok(len) = uart_manager.receive_data(&mut buffer) {
                     if len > 0 {
                         // 打印收到的数据
                         let data_str = match std::str::from_utf8(&buffer[0..len]) {
@@ -125,6 +130,17 @@ impl UartManager {
     }
 }
 
+// 创建共享的UART管理器
+pub fn create_uart_manager(
+    uart: impl Peripheral<P = esp_idf_hal::uart::UART1> + 'static,
+    tx_pin: impl Peripheral<P = impl gpio::OutputPin> + 'static,
+    rx_pin: impl Peripheral<P = impl gpio::InputPin> + 'static,
+    baudrate: u32,
+) -> anyhow::Result<Arc<UartManager>> {
+    let uart_manager = UartManager::new(uart, tx_pin, rx_pin, baudrate)?;
+    Ok(Arc::new(uart_manager))
+}
+
 // 初始化UART并启动转发服务
 pub fn initialize_uart_forwarding(
     uart: impl Peripheral<P = esp_idf_hal::uart::UART1> + 'static,
@@ -132,10 +148,12 @@ pub fn initialize_uart_forwarding(
     rx_pin: impl Peripheral<P = impl gpio::InputPin> + 'static,
     baudrate: u32,
     client_manager: Arc<TcpClientManager>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Arc<UartManager>> {
     // 使用从主函数传递的共享客户端管理器
+    let uart_manager = create_uart_manager(uart, tx_pin, rx_pin, baudrate)?;
 
-    let uart_manager = UartManager::new(uart, tx_pin, rx_pin, baudrate)?;
-    uart_manager.start_uart_forwarding(client_manager)?;
-    Ok(())
+    // 启动UART转发服务
+    UartManager::start_uart_forwarding(Arc::clone(&uart_manager), client_manager)?;
+
+    Ok(uart_manager)
 }
