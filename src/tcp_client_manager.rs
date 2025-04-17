@@ -1,146 +1,155 @@
-use log::{info, error};
+//! TCP Client Manager module
+//!
+//! This module provides functionality for managing TCP client connections.
+
+use log::{info, error, debug, trace};
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::{TcpStream, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-// 客户端连接管理器
+use crate::error::{Error, Result};
+
+/// TCP Client Manager
+///
+/// Manages TCP client connections and provides methods for broadcasting data to all clients.
 pub struct TcpClientManager {
+    /// Map of client socket addresses to TCP streams
     clients: Mutex<HashMap<SocketAddr, Arc<Mutex<TcpStream>>>>,
 }
 
 impl TcpClientManager {
+    /// Create a new TCP client manager
     pub fn new() -> Self {
         Self {
             clients: Mutex::new(HashMap::new()),
         }
     }
 
-    // 注册客户端地址（不需要流）
+    /// Register a client address (without a stream)
+    ///
+    /// This is useful for tracking clients before their streams are available.
     pub fn register_client(&self, addr: SocketAddr) {
-        // 我们只需要记录客户端地址，实际的流将在add_client中添加
-        info!("Client {} registered for future connection", addr);
+        debug!("Client {} registered for future connection", addr);
     }
 
-    // 添加新客户端（使用Arc<Mutex<TcpStream>>）
-    pub fn add_client(&self, addr: SocketAddr, stream_arc: Arc<Mutex<TcpStream>>) {
-        // 尝试获取流的锁并设置为阻塞模式
+    /// Add a new client with its stream
+    ///
+    /// The stream is wrapped in an Arc<Mutex<>> for thread-safe sharing.
+    pub fn add_client(&self, addr: SocketAddr, stream_arc: Arc<Mutex<TcpStream>>) -> Result<()> {
+        // Try to get the stream lock and set it to blocking mode
         if let Ok(stream) = stream_arc.lock() {
             if let Err(e) = stream.set_nonblocking(false) {
-                error!("Failed to set blocking mode for client {}: {:?}", addr, e);
-                // 继续添加客户端，即使设置失败
+                error!("Failed to set blocking mode for client {}: {}", addr, e);
+                // Continue adding the client even if setting the mode fails
             }
         } else {
             error!("Failed to lock stream for client {}", addr);
-            // 继续添加客户端，即使锁定失败
+            // Continue adding the client even if locking fails
         }
 
-        let mut clients = self.clients.lock().unwrap();
+        let mut clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
         info!("Adding client {} to manager", addr);
         clients.insert(addr, stream_arc);
         info!("Total clients: {}", clients.len());
+        Ok(())
     }
 
-    // 移除客户端
-    pub fn remove_client(&self, addr: &SocketAddr) {
-        let mut clients = self.clients.lock().unwrap();
+    /// Remove a client
+    pub fn remove_client(&self, addr: &SocketAddr) -> Result<()> {
+        let mut clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
         if clients.remove(addr).is_some() {
             info!("Removed client {}", addr);
             info!("Total clients: {}", clients.len());
         }
+        Ok(())
     }
 
-    // 向所有客户端广播数据
-    pub fn broadcast(&self, data: &[u8]) {
+    /// Broadcast data to all connected clients
+    /// Optimized for low latency
+    pub fn broadcast(&self, data: &[u8]) -> Result<usize> {
         // Skip if no data to send
         if data.is_empty() {
-            info!("空数据");
-            return;
+            return Ok(0);
         }
 
-        let mut clients = self.clients.lock().unwrap();
+        // 尽量减少锁的持有时间，先复制客户端列表
+        let client_streams: Vec<(SocketAddr, Arc<Mutex<TcpStream>>)>;
+        {
+            let clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
 
-        // Skip if no clients registered
-        if clients.is_empty() {
-            info!("没有client");
-            return;
+            // Skip if no clients registered
+            if clients.is_empty() {
+                return Ok(0);
+            }
+
+            // 复制客户端列表，这样可以快速释放锁
+            client_streams = clients.iter().map(|(addr, stream)| (*addr, Arc::clone(stream))).collect();
         }
 
-        info!("Broadcasting {} bytes to {} clients", data.len(), clients.len());
+        // 记录断开连接的客户端
         let mut disconnected_clients = Vec::new();
-        let client_addresses: Vec<SocketAddr> = clients.keys().cloned().collect();
+        let mut success_count = 0;
 
-        // 处理所有已注册的客户端
-        for addr in client_addresses {
-            // 检查客户端是否有流
-            if let Some(stream_arc) = clients.get_mut(&addr) {
-                info!("Sending data to client {}", addr);
+        // 使用trace级别记录详细日志，减少日志开销
+        if log::log_enabled!(log::Level::Trace) {
+            trace!("Broadcasting {} bytes to {} clients", data.len(), client_streams.len());
+        }
 
-                // 尝试获取流的锁
-                if let Ok(mut stream) = stream_arc.lock() {
-                    // 尝试写入数据
-                    match stream.write_all(data) {
-                        Ok(_) => {
-                            // 尝试立即刷新以提高响应速度
-                            if let Err(e) = stream.flush() {
-                                // 检查是否是临时错误
-                                let error_string = format!("{:?}", e);
-                                if error_string.contains("WouldBlock") || error_string.contains("TimedOut") {
-                                    // 这只是临时错误，不断开连接
-                                    info!("Temporary flush error for client {}, will retry later", addr);
-                                } else {
-                                    // 真正的错误，断开连接
-                                    error!("Error flushing after write to client {}: {:?}", addr, e);
-                                    disconnected_clients.push(addr);
-                                }
-                            }
-                        }
-                        Err(e) => {
+        // 处理所有客户端
+        for (addr, stream_arc) in client_streams {
+            // 尝试获取流的锁
+            if let Ok(mut stream) = stream_arc.lock() {
+                // 尝试写入数据
+                match stream.write_all(data) {
+                    Ok(_) => {
+                        // 立即刷新以提高响应速度
+                        if let Err(e) = stream.flush() {
                             // 检查是否是临时错误
                             let error_string = format!("{:?}", e);
-                            if error_string.contains("WouldBlock") || error_string.contains("TimedOut") {
-                                // 这只是临时错误，不断开连接
-                                info!("Temporary write error for client {}, will retry later", addr);
-                            } else {
+                            if !error_string.contains("WouldBlock") && !error_string.contains("TimedOut") {
                                 // 真正的错误，断开连接
-                                error!("Error sending to client {}: {:?}", addr, e);
                                 disconnected_clients.push(addr);
+                                continue;
                             }
                         }
+                        success_count += 1;
                     }
-                } else {
-                    // 无法获取流的锁
-                    error!("Failed to lock stream for client {}", addr);
-                    disconnected_clients.push(addr);
+                    Err(e) => {
+                        // 检查是否是临时错误
+                        let error_string = format!("{:?}", e);
+                        if !error_string.contains("WouldBlock") && !error_string.contains("TimedOut") {
+                            // 真正的错误，断开连接
+                            disconnected_clients.push(addr);
+                        }
+                    }
                 }
+            } else {
+                // 无法获取流的锁
+                disconnected_clients.push(addr);
             }
         }
 
-        // 记录断开连接的客户端数量
+        // 如果有断开连接的客户端，则移除它们
         if !disconnected_clients.is_empty() {
-            info!("{} clients disconnected during broadcast", disconnected_clients.len());
+            let mut clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
+            for addr in disconnected_clients {
+                clients.remove(&addr);
+                debug!("Removed disconnected client {}", addr);
+            }
         }
 
-        // 移除断开连接的客户端
-        for addr in disconnected_clients {
-            clients.remove(&addr);
-            info!("Removed disconnected client {}", addr);
-        }
-
-        let success_count = clients.len();
-        if success_count > 0 {
-            info!("Successfully sent {} bytes to {} clients", data.len(), success_count);
-        }
+        Ok(success_count)
     }
 
-    // 获取客户端数量
-    pub fn client_count(&self) -> usize {
-        let clients = self.clients.lock().unwrap();
-        clients.len()
+    /// Get the number of connected clients
+    pub fn client_count(&self) -> Result<usize> {
+        let clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
+        Ok(clients.len())
     }
 }
 
-// 创建一个全局的TCP客户端管理器
+/// Create a new TCP client manager wrapped in an Arc for thread-safe sharing
 pub fn create_tcp_client_manager() -> Arc<TcpClientManager> {
     Arc::new(TcpClientManager::new())
 }
