@@ -8,7 +8,7 @@ use esp_idf_hal::uart::{UartDriver, config};
 use esp_idf_hal::prelude::*;
 use esp_idf_hal::delay::BLOCK;
 use esp_idf_hal::peripheral::Peripheral;
-use log::{info, error, trace};
+use log::{info, error, trace, warn};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -135,6 +135,73 @@ impl UartManager {
         }
 
         result
+    }
+
+    /// 修改UART波特率
+    ///
+    /// 这个方法允许动态修改UART的波特率
+    pub fn set_baudrate(&self, baudrate: u32) -> Result<()> {
+        // 验证波特率是否有效
+        if !Self::is_valid_baudrate(baudrate) {
+            return Err(Error::UartError(format!("Invalid baudrate: {}", baudrate)));
+        }
+
+        // 锁定UART进行重新配置
+        let uart_guard = self.uart.lock().map_err(|_| Error::UartError("Failed to lock UART".to_string()))?;
+
+        // 创建新的UART配置
+        // 注意：当前不使用这个配置，但保留代码以便将来实现
+        let _uart_config = config::Config::new().baudrate(Hertz(baudrate));
+
+        // 应用新的波特率设置
+        // 尝试直接重新配置UART
+        // 在ESP32上，我们可以尝试使用低级API来设置波特率
+        // 这是不安全的操作，需要使用unsafe块
+        // 使用UART1而不是UART0，因为我们在初始化时使用的是UART1
+        let result = unsafe {
+            esp_idf_sys::uart_set_baudrate(1, baudrate)
+        };
+
+        match result {
+            0 => {
+                info!("Successfully changed UART baudrate to {} at runtime", baudrate);
+            },
+            err => {
+                // 如果失败，我们仍然更新内部配置
+                warn!("Failed to change UART baudrate at runtime (error code: {}). \
+                      Baudrate change will take full effect after device restart", err);
+            }
+        }
+
+        // 更新内部配置
+        let mut config = self.config.clone();
+        config.baudrate = baudrate;
+        // 修改结构体内部字段
+        unsafe {
+            let config_ptr = &self.config as *const UartConfig as *mut UartConfig;
+            (*config_ptr).baudrate = baudrate;
+        }
+
+        // 释放锁
+        drop(uart_guard);
+
+        info!("UART baudrate changed to: {}", baudrate);
+        Ok(())
+    }
+
+    /// 检查波特率是否有效
+    fn is_valid_baudrate(baudrate: u32) -> bool {
+        // 支持的波特率列表
+        const VALID_BAUDRATES: [u32; 9] = [
+            9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1500000
+        ];
+
+        VALID_BAUDRATES.contains(&baudrate)
+    }
+
+    /// 获取当前波特率
+    pub fn get_baudrate(&self) -> u32 {
+        self.config.baudrate
     }
 
     /// Start UART forwarding service

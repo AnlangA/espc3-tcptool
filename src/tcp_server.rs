@@ -2,6 +2,9 @@
 //!
 //! This module provides functionality for running a TCP server that forwards data between
 //! TCP clients and UART.
+//!
+//! It also supports command processing for controlling UART settings, such as changing
+//! the baud rate via TCP client commands.
 
 use log::{info, error, debug, trace};
 use std::io::{Read, Write};
@@ -38,6 +41,180 @@ impl TcpServer {
             config,
             client_manager,
             uart_manager,
+        }
+    }
+
+    /// Check if the received data is a command
+    ///
+    /// Commands start with "AT+" prefix
+    fn is_command(data: &[u8]) -> bool {
+        // 检查数据长度是否足够
+        if data.len() < 3 {
+            return false;
+        }
+
+        // 检查是否以AT+开头
+        if data[0] == b'A' && data[1] == b'T' && data[2] == b'+' {
+            return true;
+        }
+
+        false
+    }
+
+    /// Process a command from a client
+    ///
+    /// Currently supported commands:
+    /// - AT+BAUD=<rate>: Change UART baud rate
+    /// - AT+BAUD?: Query current UART baud rate
+    fn process_command(
+        data: &[u8],
+        uart_manager: &Arc<UartManager>,
+        stream_arc: &Arc<Mutex<TcpStream>>,
+        peer_addr: &std::net::SocketAddr
+    ) -> Result<()> {
+        // 将命令转换为字符串
+        let cmd_str = match std::str::from_utf8(data) {
+            Ok(s) => s.trim(),
+            Err(_) => {
+                // 发送错误响应
+                let response = "ERROR: Invalid command format (not UTF-8)\r\n";
+                Self::send_response(stream_arc, response, peer_addr)?;
+                return Err(Error::TcpError("Invalid command format (not UTF-8)".to_string()));
+            }
+        };
+
+        info!("Received command from client {}: {}", peer_addr, cmd_str);
+
+        // 处理波特率设置命令
+        if cmd_str.starts_with("AT+BAUD=") {
+            // 等待一小段时间，确保客户端准备好接收数据
+            thread::sleep(Duration::from_millis(20));
+
+            info!("Processing AT+BAUD= command from client {}", peer_addr);
+
+            // 提取波特率值
+            let baud_str = &cmd_str[8..];
+            match baud_str.parse::<u32>() {
+                Ok(baudrate) => {
+                    // 尝试设置新的波特率
+                    match uart_manager.as_ref().set_baudrate(baudrate) {
+                        Ok(_) => {
+                            // 发送成功响应
+                            let response = format!("OK: Baudrate changed to {}\r\n", baudrate);
+                            if let Err(e) = Self::send_response(stream_arc, &response, peer_addr) {
+                                error!("Failed to send baudrate change response to client {}: {}", peer_addr, e);
+                                return Err(e);
+                            }
+                            info!("Successfully changed baudrate to {} for client {}", baudrate, peer_addr);
+                        },
+                        Err(e) => {
+                            // 发送错误响应
+                            let response = format!("ERROR: Failed to set baudrate: {}\r\n", e);
+                            if let Err(e) = Self::send_response(stream_arc, &response, peer_addr) {
+                                error!("Failed to send baudrate error response to client {}: {}", peer_addr, e);
+                                return Err(e);
+                            }
+                        }
+                    }
+                },
+                Err(_) => {
+                    // 波特率解析失败
+                    let response = format!("ERROR: Invalid baudrate value: {}\r\n", baud_str);
+                    if let Err(e) = Self::send_response(stream_arc, &response, peer_addr) {
+                        error!("Failed to send invalid baudrate response to client {}: {}", peer_addr, e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        // 处理波特率查询命令
+        else if cmd_str.starts_with("AT+BAUD?") {
+            // 等待一小段时间，确保客户端准备好接收数据
+            thread::sleep(Duration::from_millis(20));
+
+            info!("Processing AT+BAUD? command from client {}", peer_addr);
+
+            // 获取当前波特率
+            let current_baudrate = uart_manager.as_ref().get_baudrate();
+            let response = format!("Current baudrate: {}\r\n", current_baudrate);
+            if let Err(e) = Self::send_response(stream_arc, &response, peer_addr) {
+                error!("Failed to send baudrate query response to client {}: {}", peer_addr, e);
+                return Err(e);
+            }
+            info!("Successfully sent current baudrate {} to client {}", current_baudrate, peer_addr);
+        }
+        // 处理帮助命令
+        else if cmd_str.starts_with("AT+HELP") {
+            // 等待一小段时间，确保客户端准备好接收数据
+            thread::sleep(Duration::from_millis(20));
+
+            info!("Processing AT+HELP command from client {}", peer_addr);
+
+            let help_text = String::from("\r\nAvailable commands:\r\n")
+                + "  AT+BAUD=<rate>  - Change UART baud rate\r\n"
+                + "  AT+BAUD?       - Query current UART baud rate\r\n"
+                + "  AT+HELP        - Show this help message\r\n"
+                + "\r\nSupported baud rates: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1500000\r\n";
+
+            // 发送响应
+            if let Err(e) = Self::send_response(stream_arc, &help_text, peer_addr) {
+                error!("Failed to send help text to client {}: {}", peer_addr, e);
+                return Err(e);
+            }
+            info!("Successfully sent help text to client {}", peer_addr);
+        }
+        // 未知命令
+        else {
+            // 等待一小段时间，确保客户端准备好接收数据
+            thread::sleep(Duration::from_millis(20));
+
+            info!("Processing unknown command '{}' from client {}", cmd_str, peer_addr);
+
+            let response = format!("ERROR: Unknown command: {}\r\nType AT+HELP for available commands\r\n", cmd_str);
+            if let Err(e) = Self::send_response(stream_arc, &response, peer_addr) {
+                error!("Failed to send unknown command response to client {}: {}", peer_addr, e);
+                return Err(e);
+            }
+            info!("Successfully sent unknown command response to client {}", peer_addr);
+        }
+
+        Ok(())
+    }
+
+    /// Send a response to a client
+    fn send_response(
+        stream_arc: &Arc<Mutex<TcpStream>>,
+        response: &str,
+        peer_addr: &std::net::SocketAddr
+    ) -> Result<()> {
+        // 尝试获取流锁
+        let mut stream = match stream_arc.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Err(Error::TcpError(format!("Failed to lock stream for client {}", peer_addr))),
+        };
+
+        // 尝试将流设置为阻塞模式，以确保数据发送完成
+        let _ = stream.set_nonblocking(false);
+
+        // 写入响应数据
+        match stream.write_all(response.as_bytes()) {
+            Ok(_) => {
+                // 立即刷新数据，确保数据被发送
+                if let Err(e) = stream.flush() {
+                    error!("Failed to flush response to client {}: {}", peer_addr, e);
+                    return Err(Error::TcpError(format!("Failed to flush response to client {}: {}", peer_addr, e)));
+                }
+
+                // 恢复非阻塞模式
+                let _ = stream.set_nonblocking(true);
+
+                info!("Sent response to client {}: {}", peer_addr, response.trim());
+                Ok(())
+            },
+            Err(e) => {
+                error!("Failed to send response to client {}: {}", peer_addr, e);
+                Err(Error::TcpError(format!("Failed to send response to client {}: {}", peer_addr, e)))
+            }
         }
     }
 
@@ -121,12 +298,22 @@ impl TcpServer {
     /// Handle a client connection
     ///
     /// This method handles a client connection, reading data from the client and forwarding it to UART.
+    /// It also handles receiving data from UART and sending it to the client.
     fn handle_client(
         stream: TcpStream,
         client_manager: Arc<TcpClientManager>,
         uart_manager: Arc<UartManager>,
         buffer_size: usize,
     ) -> Result<()> {
+        // 创建一个结构体来存储客户端的数据交互时间
+        struct ClientData {
+            last_interaction: std::time::Instant,
+        }
+
+        // 创建客户端数据实例
+        let mut client_data = ClientData {
+            last_interaction: std::time::Instant::now(),
+        };
         let peer_addr = stream.peer_addr()
             .map_err(|e| Error::TcpError(format!("Failed to get peer address: {}", e)))?;
 
@@ -157,6 +344,12 @@ impl TcpServer {
             error!("Failed to set non-blocking mode for client {}: {}", peer_addr, e);
             // Continue even if setting the mode fails
         }
+
+        // 设置 TCP 的缓冲区大小，提高性能
+        if let Err(e) = stream_guard.set_nodelay(true) {
+            error!("Failed to set TCP_NODELAY for client {}: {}", peer_addr, e);
+            // Continue even if setting the option fails
+        }
         debug!("Client {} ready for reading", peer_addr);
 
         // Release the lock so other threads can use the stream
@@ -166,30 +359,65 @@ impl TcpServer {
         let mut buffer = vec![0; buffer_size];
         debug!("Starting to read from client {}", peer_addr);
 
+        // 等待一小段时间，确保客户端已准备好接收数据
+        thread::sleep(Duration::from_millis(10));
+
         // 发送欢迎消息
-        let welcome_msg = format!("Welcome to ESP32 UART-TCP Bridge! Your client ID: {}\r\n", peer_addr);
+        let welcome_msg = format!(
+            "Welcome to ESP32 UART-TCP Bridge! Your client ID: {}\r\n\
+            Type AT+HELP for available commands\r\n\
+            Current UART baudrate: {}\r\n",
+            peer_addr,
+            uart_manager.as_ref().get_baudrate()
+        );
         if let Ok(mut stream) = stream_arc.lock() {
-            if let Err(e) = stream.write_all(welcome_msg.as_bytes()) {
-                error!("Failed to send welcome message to client {}: {}", peer_addr, e);
-            } else {
-                debug!("Sent welcome message to client {}", peer_addr);
+            match stream.write_all(welcome_msg.as_bytes()) {
+                Ok(_) => {
+                    // 立即刷新数据，确保数据被发送
+                    if let Err(e) = stream.flush() {
+                        error!("Failed to flush welcome message to client {}: {}", peer_addr, e);
+                    } else {
+                        info!("Sent welcome message to client {}", peer_addr);
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to send welcome message to client {}: {}", peer_addr, e);
+                }
             }
         }
 
         // 初始化心跳计时器
         let mut last_heartbeat = std::time::Instant::now();
         let heartbeat_interval = Duration::from_secs(30); // 30秒发送一次心跳
+        let idle_timeout = Duration::from_secs(60);       // 60秒无数据交互后才发送心跳
+        let mut heartbeat_counter: u32 = 0;               // 心跳计数器
 
         loop {
             // 检查是否需要发送心跳包
             let now = std::time::Instant::now();
-            if now.duration_since(last_heartbeat) >= heartbeat_interval {
+            let idle_time = now.duration_since(client_data.last_interaction);
+
+            // 只有在最后一次数据交互后的一分钟才发送心跳
+            if idle_time >= idle_timeout && now.duration_since(last_heartbeat) >= heartbeat_interval {
                 if let Ok(mut stream) = stream_arc.lock() {
-                    // 发送心跳包以保持连接
-                    if let Err(e) = stream.write_all(b"\r\n") {
-                        error!("Failed to send heartbeat to client {}: {}", peer_addr, e);
-                    } else {
-                        trace!("Sent heartbeat to client {}", peer_addr);
+                    // 发送心跳包以保持连接，使用有意义的数据
+                    heartbeat_counter = heartbeat_counter.wrapping_add(1);
+                    let heartbeat_msg = format!("{{\"type\":\"heartbeat\",\"id\":{},\"idle\":{}}}\r\n",
+                                                heartbeat_counter, idle_time.as_secs());
+
+                    match stream.write_all(heartbeat_msg.as_bytes()) {
+                        Ok(_) => {
+                            // 立即刷新数据，确保数据被发送
+                            if let Err(e) = stream.flush() {
+                                error!("Failed to flush heartbeat to client {}: {}", peer_addr, e);
+                            } else {
+                                trace!("Sent heartbeat #{} to client {} (idle for {}s)",
+                                      heartbeat_counter, peer_addr, idle_time.as_secs());
+                            }
+                        },
+                        Err(e) => {
+                            error!("Failed to send heartbeat to client {}: {}", peer_addr, e);
+                        }
                     }
                 }
                 last_heartbeat = now;
@@ -217,6 +445,9 @@ impl TcpServer {
                 Ok(n) => {
                     // Send the received data to UART
                     if n > 0 {
+                        // 更新最后一次数据交互时间
+                        client_data.last_interaction = std::time::Instant::now();
+
                         // 使用trace级别记录详细日志，减少日志开销
                         if log::log_enabled!(log::Level::Trace) {
                             let hex_str: String = buffer[0..n].iter()
@@ -227,9 +458,23 @@ impl TcpServer {
                             debug!("TCP -> UART: {} bytes from {}", n, peer_addr);
                         }
 
-                        // 直接发送数据到UART，不做中间处理
-                        if let Err(e) = uart_manager.send_data(&buffer[0..n]) {
-                            error!("Error sending data to UART: {}", e);
+                        // 检查是否是命令
+                        if Self::is_command(&buffer[0..n]) {
+                            // 释放流锁，以便在命令处理过程中可以重新获取锁
+                            drop(stream);
+
+                            // 等待一小段时间，确保客户端准备好接收数据
+                            thread::sleep(Duration::from_millis(10));
+
+                            // 处理命令
+                            if let Err(e) = Self::process_command(&buffer[0..n], &uart_manager, &stream_arc, &peer_addr) {
+                                error!("Error processing command from client {}: {}", peer_addr, e);
+                            }
+                        } else {
+                            // 直接发送数据到UART，不做中间处理
+                            if let Err(e) = uart_manager.send_data(&buffer[0..n]) {
+                                error!("Error sending data to UART: {}", e);
+                            }
                         }
                     }
                 }
