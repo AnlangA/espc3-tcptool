@@ -6,6 +6,7 @@
 // Export modules
 pub mod config;
 pub mod error;
+pub mod storage;
 pub mod tcp_client_manager;
 pub mod tcp_server;
 pub mod uart;
@@ -14,6 +15,7 @@ pub mod wifi;
 // Re-export public interfaces for easier access from crate root
 pub use config::{AppConfig, create_config};
 pub use error::{Error, Result};
+pub use storage::StorageManager;
 pub use tcp_client_manager::TcpClientManager;
 pub use tcp_server::TcpServer;
 pub use uart::UartManager;

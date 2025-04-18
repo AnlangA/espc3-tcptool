@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use crate::config::UartConfig;
 use crate::error::{Error, Result};
+use crate::storage::StorageManager;
 use crate::tcp_client_manager::TcpClientManager;
 
 /// UART Manager
@@ -25,6 +26,8 @@ pub struct UartManager {
     uart: Mutex<UartDriver<'static>>,
     /// UART configuration
     config: UartConfig,
+    /// Storage manager for persistent configuration
+    storage: Option<Mutex<StorageManager>>,
 }
 
 impl UartManager {
@@ -33,8 +36,32 @@ impl UartManager {
         uart: impl Peripheral<P = esp_idf_hal::uart::UART1> + 'static,
         tx_pin: impl Peripheral<P = impl gpio::OutputPin> + 'static,
         rx_pin: impl Peripheral<P = impl gpio::InputPin> + 'static,
-        config: UartConfig,
+        mut config: UartConfig,
     ) -> Result<Self> {
+        // Try to initialize storage manager
+        let storage = match StorageManager::new() {
+            Ok(storage) => {
+                // Try to read baudrate from flash
+                if let Some(baudrate) = storage.read_baudrate() {
+                    // Check if the baudrate is valid
+                    if Self::is_valid_baudrate(baudrate) {
+                        // Update config with the baudrate from flash
+                        info!("Using baudrate {} from flash", baudrate);
+                        config.baudrate = baudrate;
+                    } else {
+                        warn!("Invalid baudrate {} read from flash, using default", baudrate);
+                    }
+                } else {
+                    info!("No baudrate found in flash, using default: {}", config.baudrate);
+                }
+                Some(Mutex::new(storage))
+            },
+            Err(e) => {
+                warn!("Failed to initialize storage manager: {}, baudrate will not be persisted", e);
+                None
+            }
+        };
+
         // Configure UART
         let uart_config = config::Config::new().baudrate(Hertz(config.baudrate));
 
@@ -53,6 +80,7 @@ impl UartManager {
         Ok(Self {
             uart: Mutex::new(uart),
             config,
+            storage,
         })
     }
 
@@ -180,6 +208,22 @@ impl UartManager {
         unsafe {
             let config_ptr = &self.config as *const UartConfig as *mut UartConfig;
             (*config_ptr).baudrate = baudrate;
+        }
+
+        // 保存波特率到flash
+        if let Some(storage_mutex) = &self.storage {
+            match storage_mutex.lock() {
+                Ok(mut storage) => {
+                    if let Err(e) = storage.save_baudrate(baudrate) {
+                        warn!("Failed to save baudrate to flash: {}", e);
+                    } else {
+                        info!("Baudrate {} saved to flash", baudrate);
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to lock storage manager: {}, baudrate will not be persisted", e);
+                }
+            }
         }
 
         // 释放锁

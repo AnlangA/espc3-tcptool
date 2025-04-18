@@ -17,6 +17,8 @@ pub enum Error {
     UartError(String),
     /// Client manager errors
     ClientError(String),
+    /// Storage errors
+    StorageError(String),
     /// General errors
     General(String),
 }
@@ -30,6 +32,7 @@ impl fmt::Display for Error {
             Error::TcpError(msg) => write!(f, "TCP error: {}", msg),
             Error::UartError(msg) => write!(f, "UART error: {}", msg),
             Error::ClientError(msg) => write!(f, "Client error: {}", msg),
+            Error::StorageError(msg) => write!(f, "Storage error: {}", msg),
             Error::General(msg) => write!(f, "Error: {}", msg),
         }
     }
