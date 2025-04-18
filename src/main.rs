@@ -48,6 +48,9 @@ fn main() -> anyhow::Result<()> {
 
 /// Run the application using the new object-oriented API
 fn run_with_new_api(peripherals: Peripherals, config: AppConfig) -> Result<()> {
+    // 保存配置值以便后续使用
+    let tcp_port = config.tcp_server.port;
+    let uart_baudrate = config.uart.baudrate;
     // Initialize WiFi
     let mut wifi_manager = WiFiManager::new(config.wifi)?;
     info!("WiFi manager created");
@@ -77,7 +80,7 @@ fn run_with_new_api(peripherals: Peripherals, config: AppConfig) -> Result<()> {
     info!("UART forwarding service started");
 
     // 创建并运行TCP服务器
-    info!("Starting TCP server on port {}...", config.tcp_server.port);
+    info!("Starting TCP server on port {}...", tcp_port);
     let tcp_server = Arc::new(TcpServer::new(
         config.tcp_server,
         Arc::clone(&client_manager),
@@ -103,8 +106,9 @@ fn run_with_new_api(peripherals: Peripherals, config: AppConfig) -> Result<()> {
 
     info!("==================================================");
     info!("ESP32 is running with TCP server and UART forwarding service");
-    info!("TCP Server Port: 8080");
-    info!("UART Baudrate: 115200");
+    info!("TCP Server Port: {}", tcp_port);
+    info!("UART Baudrate: {} (can be changed via TCP commands)", uart_baudrate);
+    info!("Use AT+HELP command to see available commands");
     info!("==================================================");
 
     // 保持程序运行并定期检查状态
