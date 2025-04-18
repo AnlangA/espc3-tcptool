@@ -121,12 +121,22 @@ impl TcpServer {
     /// Handle a client connection
     ///
     /// This method handles a client connection, reading data from the client and forwarding it to UART.
+    /// It also handles receiving data from UART and sending it to the client.
     fn handle_client(
         stream: TcpStream,
         client_manager: Arc<TcpClientManager>,
         uart_manager: Arc<UartManager>,
         buffer_size: usize,
     ) -> Result<()> {
+        // 创建一个结构体来存储客户端的数据交互时间
+        struct ClientData {
+            last_interaction: std::time::Instant,
+        }
+
+        // 创建客户端数据实例
+        let mut client_data = ClientData {
+            last_interaction: std::time::Instant::now(),
+        };
         let peer_addr = stream.peer_addr()
             .map_err(|e| Error::TcpError(format!("Failed to get peer address: {}", e)))?;
 
@@ -179,17 +189,27 @@ impl TcpServer {
         // 初始化心跳计时器
         let mut last_heartbeat = std::time::Instant::now();
         let heartbeat_interval = Duration::from_secs(30); // 30秒发送一次心跳
+        let idle_timeout = Duration::from_secs(60);       // 60秒无数据交互后才发送心跳
+        let mut heartbeat_counter: u32 = 0;               // 心跳计数器
 
         loop {
             // 检查是否需要发送心跳包
             let now = std::time::Instant::now();
-            if now.duration_since(last_heartbeat) >= heartbeat_interval {
+            let idle_time = now.duration_since(client_data.last_interaction);
+
+            // 只有在最后一次数据交互后的一分钟才发送心跳
+            if idle_time >= idle_timeout && now.duration_since(last_heartbeat) >= heartbeat_interval {
                 if let Ok(mut stream) = stream_arc.lock() {
-                    // 发送心跳包以保持连接
-                    if let Err(e) = stream.write_all(b"\r\n") {
+                    // 发送心跳包以保持连接，使用有意义的数据
+                    heartbeat_counter = heartbeat_counter.wrapping_add(1);
+                    let heartbeat_msg = format!("{{\"type\":\"heartbeat\",\"id\":{},\"idle\":{}}}\r\n",
+                                                heartbeat_counter, idle_time.as_secs());
+
+                    if let Err(e) = stream.write_all(heartbeat_msg.as_bytes()) {
                         error!("Failed to send heartbeat to client {}: {}", peer_addr, e);
                     } else {
-                        trace!("Sent heartbeat to client {}", peer_addr);
+                        trace!("Sent heartbeat #{} to client {} (idle for {}s)",
+                              heartbeat_counter, peer_addr, idle_time.as_secs());
                     }
                 }
                 last_heartbeat = now;
@@ -217,6 +237,9 @@ impl TcpServer {
                 Ok(n) => {
                     // Send the received data to UART
                     if n > 0 {
+                        // 更新最后一次数据交互时间
+                        client_data.last_interaction = std::time::Instant::now();
+
                         // 使用trace级别记录详细日志，减少日志开销
                         if log::log_enabled!(log::Level::Trace) {
                             let hex_str: String = buffer[0..n].iter()
