@@ -385,43 +385,8 @@ impl TcpServer {
                 }
             }
         }
-
-        // 初始化心跳计时器
-        let mut last_heartbeat = std::time::Instant::now();
-        let heartbeat_interval = Duration::from_secs(30); // 30秒发送一次心跳
-        let idle_timeout = Duration::from_secs(60);       // 60秒无数据交互后才发送心跳
-        let mut heartbeat_counter: u32 = 0;               // 心跳计数器
-
+        
         loop {
-            // 检查是否需要发送心跳包
-            let now = std::time::Instant::now();
-            let idle_time = now.duration_since(client_data.last_interaction);
-
-            // 只有在最后一次数据交互后的一分钟才发送心跳
-            if idle_time >= idle_timeout && now.duration_since(last_heartbeat) >= heartbeat_interval {
-                if let Ok(mut stream) = stream_arc.lock() {
-                    // 发送心跳包以保持连接，使用有意义的数据
-                    heartbeat_counter = heartbeat_counter.wrapping_add(1);
-                    let heartbeat_msg = format!("{{\"type\":\"heartbeat\",\"id\":{},\"idle\":{}}}\r\n",
-                                                heartbeat_counter, idle_time.as_secs());
-
-                    match stream.write_all(heartbeat_msg.as_bytes()) {
-                        Ok(_) => {
-                            // 立即刷新数据，确保数据被发送
-                            if let Err(e) = stream.flush() {
-                                error!("Failed to flush heartbeat to client {}: {}", peer_addr, e);
-                            } else {
-                                trace!("Sent heartbeat #{} to client {} (idle for {}s)",
-                                      heartbeat_counter, peer_addr, idle_time.as_secs());
-                            }
-                        },
-                        Err(e) => {
-                            error!("Failed to send heartbeat to client {}: {}", peer_addr, e);
-                        }
-                    }
-                }
-                last_heartbeat = now;
-            }
 
             // 获取流锁进行读取
             let mut stream = match stream_arc.lock() {
