@@ -15,8 +15,7 @@ use espc3::{
     wifi::WiFiManager,
 };
 
-// Import the legacy functions
-use espc3::{configure_wifi_mixed_mode, run_tcp_server, initialize_uart_forwarding, create_tcp_client_manager};
+// 不再需要导入旧的兼容性函数
 
 fn main() -> anyhow::Result<()> {
     // Initialize the ESP-IDF system
@@ -57,8 +56,7 @@ fn run_with_new_api(peripherals: Peripherals, config: AppConfig) -> Result<()> {
     wifi_manager.configure_mixed_mode()?;
     wifi_manager.start()?;
 
-    // Give WiFi some time to fully initialize
-    thread::sleep(Duration::from_secs(2));
+    // WiFi已经在start方法中等待初始化完成
     info!("WiFi initialization complete");
 
     // Create shared TCP client manager
@@ -78,75 +76,54 @@ fn run_with_new_api(peripherals: Peripherals, config: AppConfig) -> Result<()> {
     UartManager::start_forwarding(Arc::clone(&uart_manager), Arc::clone(&client_manager))?;
     info!("UART forwarding service started");
 
-    // Create and run TCP server in a separate thread
+    // 创建并运行TCP服务器
+    info!("Starting TCP server on port {}...", config.tcp_server.port);
     let tcp_server = Arc::new(TcpServer::new(
         config.tcp_server,
         Arc::clone(&client_manager),
         Arc::clone(&uart_manager),
     ));
 
+    // 使用命名线程和更大的栈空间
     let server_arc = Arc::clone(&tcp_server);
-    thread::spawn(move || {
-        if let Err(e) = server_arc.run() {
-            error!("TCP server error: {:?}", e);
-        }
-    });
+    let _server_thread = thread::Builder::new()
+        .name("tcp_server".into())
+        .stack_size(8192) // 增加栈大小以防止栈溢出
+        .spawn(move || {
+            info!("TCP server thread started");
+            if let Err(e) = server_arc.run() {
+                error!("TCP server error: {:?}", e);
+            }
+        })
+        .expect("Failed to spawn TCP server thread");
 
-    // Give TCP server time to start
-    thread::sleep(Duration::from_millis(500));
-    info!("TCP server started");
+    // 给TCP服务器时间启动
+    thread::sleep(Duration::from_millis(100));
+    info!("TCP server started and ready for connections");
 
+    info!("==================================================");
     info!("ESP32 is running with TCP server and UART forwarding service");
+    info!("TCP Server Port: 8080");
+    info!("UART Baudrate: 115200");
+    info!("==================================================");
 
-    // Keep the program running
+    // 保持程序运行并定期检查状态
+    let mut last_client_count = 0;
     loop {
-        thread::sleep(Duration::from_secs(10));
-        info!("ESP32 still running...");
-    }
-}
+        thread::sleep(Duration::from_secs(5));
 
-/// Run the application using the legacy API for backward compatibility
-#[allow(dead_code)]
-fn run_with_legacy_api(peripherals: Peripherals) -> anyhow::Result<()> {
-    // Configure WiFi in mixed mode
-    let _wifi = configure_wifi_mixed_mode()?;
-
-    // Give WiFi some time to fully initialize
-    std::thread::sleep(Duration::from_secs(2));
-    info!("WiFi initialization complete, starting TCP server...");
-
-    // Create shared TCP client manager
-    let client_manager = create_tcp_client_manager();
-    info!("Created shared TCP client manager");
-
-    // Initialize UART1 (TX:GPIO21, RX:GPIO20, baudrate:115200)
-    // and get shared UART manager
-    let uart_manager = initialize_uart_forwarding(
-        peripherals.uart1,
-        peripherals.pins.gpio21,
-        peripherals.pins.gpio20,
-        115_200, // baudrate set to 115200
-        Arc::clone(&client_manager) // pass shared client manager
-    )?;
-    info!("UART initialized and forwarding service started");
-
-    // Start TCP server in a separate thread with the shared client manager and UART manager
-    let server_client_manager = Arc::clone(&client_manager);
-    let server_uart_manager = Arc::clone(&uart_manager);
-    thread::spawn(move || {
-        if let Err(e) = run_tcp_server(server_client_manager, server_uart_manager) {
-            error!("TCP server error: {:?}", e);
+        // 检查客户端连接状态
+        if let Ok(current_client_count) = client_manager.client_count() {
+            if current_client_count != last_client_count {
+                if current_client_count > 0 {
+                    info!("Currently {} TCP client(s) connected", current_client_count);
+                } else {
+                    info!("No TCP clients connected. Waiting for connections...");
+                }
+                last_client_count = current_client_count;
+            }
         }
-    });
-
-    // Give TCP server time to start
-    std::thread::sleep(Duration::from_millis(500));
-
-    info!("ESP32 is running with TCP server and UART service (forwarding UART data to TCP clients)...");
-
-    // Keep the program running
-    loop {
-        std::thread::sleep(Duration::from_secs(10));
-        info!("ESP32 still running...");
     }
 }
+
+// 旧的兼容性函数已删除

@@ -22,10 +22,10 @@ impl Default for WiFiConfig {
         Self {
             client_ssid: String::try_from("your_wifi_ssid").unwrap_or_default(),
             client_password: String::try_from("your_wifi_password").unwrap_or_default(),
-            ap_ssid: String::try_from("ESP32-AP").unwrap_or_default(),
-            ap_password: String::try_from("password123").unwrap_or_default(),
-            ap_channel: 6,
-            ap_max_connections: 10,
+            ap_ssid: String::try_from("ESP32-UART-Bridge").unwrap_or_default(),
+            ap_password: String::try_from("12345678").unwrap_or_default(),
+            ap_channel: 1,                // 使用通道 1，减少干扰
+            ap_max_connections: 4,        // 限制连接数量以提高稳定性
         }
     }
 }
@@ -44,9 +44,9 @@ pub struct TcpServerConfig {
 impl Default for TcpServerConfig {
     fn default() -> Self {
         Self {
-            bind_address: "0.0.0.0",
-            port: 8080,
-            buffer_size: 1024,
+            bind_address: "0.0.0.0",      // 绑定到所有接口
+            port: 8080,                 // 标准端口
+            buffer_size: 2048,          // 增大缓冲区以提高性能
         }
     }
 }
@@ -65,9 +65,9 @@ pub struct UartConfig {
 impl Default for UartConfig {
     fn default() -> Self {
         Self {
-            baudrate: 115_200,
-            buffer_size: 512,  // 增加缓冲区大小以减少读取次数
-            poll_interval_ms: 1, // 减少轮询间隔以降低延迟
+            baudrate: 115_200,          // 标准波特率
+            buffer_size: 1024,          // 更大的缓冲区以减少读取次数
+            poll_interval_ms: 1,        // 最小轮询间隔以降低延迟
         }
     }
 }

@@ -4,7 +4,7 @@
 //! TCP clients and UART.
 
 use log::{info, error, debug, trace};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -45,17 +45,50 @@ impl TcpServer {
     ///
     /// This method starts the TCP server and accepts connections.
     pub fn run(&self) -> Result<()> {
-        // Create a TCP listener bound to the configured address and port
+        // 创建一个绑定到指定地址和端口的TCP监听器
         let bind_address = format!("{}:{}", self.config.bind_address, self.config.port);
-        let listener = TcpListener::bind(&bind_address)
-            .map_err(|e| Error::TcpError(format!("Failed to bind to {}: {}", bind_address, e)))?;
 
-        info!("TCP server listening on {}", bind_address);
+        // 尝试绑定到指定地址和端口
+        info!("Attempting to bind TCP server to {}", bind_address);
+        let listener = match TcpListener::bind(&bind_address) {
+            Ok(l) => {
+                info!("Successfully bound to {}", bind_address);
+                l
+            },
+            Err(e) => {
+                // 如果绑定失败，尝试备选地址
+                error!("Failed to bind to {}: {}", bind_address, e);
 
-        // Set socket options for better reliability
+                // 尝试备选地址
+                let alt_bind_address = format!("192.168.4.1:{}", self.config.port);
+                info!("Trying alternative bind address: {}", alt_bind_address);
+
+                match TcpListener::bind(&alt_bind_address) {
+                    Ok(l) => {
+                        info!("Successfully bound to alternative address: {}", alt_bind_address);
+                        l
+                    },
+                    Err(e2) => {
+                        // 如果备选地址也失败，尝试使用不同端口
+                        error!("Failed to bind to alternative address {}: {}", alt_bind_address, e2);
+
+                        let fallback_port = self.config.port + 1;
+                        let fallback_address = format!("0.0.0.0:{}", fallback_port);
+                        info!("Trying fallback address with different port: {}", fallback_address);
+
+                        TcpListener::bind(&fallback_address)
+                            .map_err(|e3| Error::TcpError(format!("Failed to bind to any address: {}, {}, {}", e, e2, e3)))?
+                    }
+                }
+            }
+        };
+
+        info!("TCP server successfully bound and listening");
+
+        // 设置套接字选项以提高可靠性
         if let Err(e) = listener.set_nonblocking(false) {
             error!("Failed to set TCP listener to blocking mode: {}", e);
-            // Continue even if setting the mode fails
+            // 即使设置模式失败也继续
         } else {
             info!("TCP server set to blocking mode");
         }
@@ -99,9 +132,14 @@ impl TcpServer {
 
         info!("New client connected: {}", peer_addr);
 
-        // Register the client address
-        client_manager.register_client(peer_addr);
-        debug!("Registered client {} with manager", peer_addr);
+        // 检查客户端是否已经连接
+        if client_manager.is_client_connected(&peer_addr) {
+            info!("Client {} is already connected, updating connection", peer_addr);
+        } else {
+            // 注册客户端地址
+            client_manager.register_client(peer_addr);
+            debug!("Registered new client {} with manager", peer_addr);
+        }
 
         // Wrap the stream in an Arc<Mutex<>> for thread-safe sharing
         let stream_arc = Arc::new(Mutex::new(stream));
@@ -124,12 +162,40 @@ impl TcpServer {
         // Release the lock so other threads can use the stream
         drop(stream_guard);
 
-        // Buffer for reading data
+        // 初始化缓冲区
         let mut buffer = vec![0; buffer_size];
         debug!("Starting to read from client {}", peer_addr);
 
+        // 发送欢迎消息
+        let welcome_msg = format!("Welcome to ESP32 UART-TCP Bridge! Your client ID: {}\r\n", peer_addr);
+        if let Ok(mut stream) = stream_arc.lock() {
+            if let Err(e) = stream.write_all(welcome_msg.as_bytes()) {
+                error!("Failed to send welcome message to client {}: {}", peer_addr, e);
+            } else {
+                debug!("Sent welcome message to client {}", peer_addr);
+            }
+        }
+
+        // 初始化心跳计时器
+        let mut last_heartbeat = std::time::Instant::now();
+        let heartbeat_interval = Duration::from_secs(30); // 30秒发送一次心跳
+
         loop {
-            // Get the stream lock for reading
+            // 检查是否需要发送心跳包
+            let now = std::time::Instant::now();
+            if now.duration_since(last_heartbeat) >= heartbeat_interval {
+                if let Ok(mut stream) = stream_arc.lock() {
+                    // 发送心跳包以保持连接
+                    if let Err(e) = stream.write_all(b"\r\n") {
+                        error!("Failed to send heartbeat to client {}: {}", peer_addr, e);
+                    } else {
+                        trace!("Sent heartbeat to client {}", peer_addr);
+                    }
+                }
+                last_heartbeat = now;
+            }
+
+            // 获取流锁进行读取
             let mut stream = match stream_arc.lock() {
                 Ok(guard) => guard,
                 Err(e) => {

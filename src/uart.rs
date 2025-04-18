@@ -8,7 +8,7 @@ use esp_idf_hal::uart::{UartDriver, config};
 use esp_idf_hal::prelude::*;
 use esp_idf_hal::delay::BLOCK;
 use esp_idf_hal::peripheral::Peripheral;
-use log::{info, error, debug, trace};
+use log::{info, error, trace};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -140,13 +140,16 @@ impl UartManager {
     /// Start UART forwarding service
     ///
     /// This method starts a thread that reads data from UART and forwards it to TCP clients.
-    /// Optimized for low latency.
+    /// Highly optimized for low latency.
     pub fn start_forwarding(self_arc: Arc<Self>, client_manager: Arc<TcpClientManager>) -> Result<()> {
         let uart_manager = Arc::clone(&self_arc);
         let config = uart_manager.config.clone();
 
         // 使用高优先级线程处理UART数据
-        let builder = thread::Builder::new().name("uart_forwarding".into());
+        let builder = thread::Builder::new()
+            .name("uart_forwarding".into())
+            .stack_size(4096); // 指定足够的栈大小
+
         builder.spawn(move || {
             // 预分配缓冲区以避免运行时分配
             let mut buffer = vec![0u8; config.buffer_size];
@@ -156,15 +159,32 @@ impl UartManager {
             let mut last_data_time = std::time::Instant::now();
             let mut adaptive_interval = poll_interval;
 
+            // 检查是否有客户端的频率较低，减少不必要的检查
+            let mut check_counter = 0;
+            let check_interval = 10; // 每10次读取才检查一次客户端数量
+
             loop {
+                // 定期检查是否有客户端连接
+                check_counter += 1;
+                if check_counter >= check_interval {
+                    check_counter = 0;
+                    // 如果没有客户端，可以使用更长的轮询间隔
+                    let client_count = match client_manager.client_count() {
+                        Ok(count) => count,
+                        Err(_) => 0, // 如果出错，假设没有客户端
+                    };
+                    if client_count == 0 {
+                        thread::sleep(Duration::from_millis(50)); // 更长的睡眠时间
+                        continue;
+                    }
+                }
+
                 // 使用非阻塞模式读取数据
                 match uart_manager.receive_data(&mut buffer) {
                     Ok(len) => {
                         if len > 0 {
                             // 有数据时立即广播到所有TCP客户端，不做中间处理
-                            if let Err(e) = client_manager.broadcast(&buffer[0..len]) {
-                                error!("Error broadcasting data to clients: {}", e);
-                            }
+                            let _ = client_manager.broadcast(&buffer[0..len]); // 忽略错误，减少延迟
 
                             // 更新最后收到数据的时间
                             last_data_time = std::time::Instant::now();
@@ -172,15 +192,9 @@ impl UartManager {
                             // 当有数据时使用最短轮询间隔，减少延迟
                             adaptive_interval = poll_interval;
 
-                            // 只在trace级别记录详细数据，减少日志开销
+                            // 只在trace级别记录详细数据
                             if log::log_enabled!(log::Level::Trace) {
-                                let hex_str: String = buffer[0..len].iter()
-                                    .map(|b| format!("{:02X} ", b))
-                                    .collect();
-                                trace!("UART -> TCP: {} bytes (hex): {}", len, hex_str);
-                            } else {
-                                // 只记录长度信息
-                                debug!("UART -> TCP: {} bytes", len);
+                                trace!("UART -> TCP: {} bytes", len);
                             }
                         } else {
                             // 如果长时间没有数据，可以增加轮询间隔以减少CPU使用
@@ -193,9 +207,8 @@ impl UartManager {
                             }
                         }
                     }
-                    Err(e) => {
-                        // 只记录非超时错误
-                        error!("UART receive error in forwarding service: {}", e);
+                    Err(_) => {
+                        // 完全忽略错误，减少延迟
                     }
                 }
 
@@ -209,37 +222,4 @@ impl UartManager {
     }
 }
 
-/// Create a new UART manager with the given configuration
-pub fn create_uart_manager(
-    uart: impl Peripheral<P = esp_idf_hal::uart::UART1> + 'static,
-    tx_pin: impl Peripheral<P = impl gpio::OutputPin> + 'static,
-    rx_pin: impl Peripheral<P = impl gpio::InputPin> + 'static,
-    baudrate: u32,
-) -> Result<Arc<UartManager>> {
-    let config = UartConfig {
-        baudrate,
-        ..UartConfig::default()
-    };
-
-    let uart_manager = UartManager::new(uart, tx_pin, rx_pin, config)?;
-    Ok(Arc::new(uart_manager))
-}
-
-/// Initialize UART and start forwarding service
-///
-/// This is a convenience function for backward compatibility
-pub fn initialize_uart_forwarding(
-    uart: impl Peripheral<P = esp_idf_hal::uart::UART1> + 'static,
-    tx_pin: impl Peripheral<P = impl gpio::OutputPin> + 'static,
-    rx_pin: impl Peripheral<P = impl gpio::InputPin> + 'static,
-    baudrate: u32,
-    client_manager: Arc<TcpClientManager>,
-) -> anyhow::Result<Arc<UartManager>> {
-    // Create UART manager with default configuration
-    let uart_manager = create_uart_manager(uart, tx_pin, rx_pin, baudrate)?;
-
-    // Start UART forwarding service
-    UartManager::start_forwarding(Arc::clone(&uart_manager), client_manager)?;
-
-    Ok(uart_manager)
-}
+// 旧的兼容性函数已删除

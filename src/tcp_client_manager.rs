@@ -16,6 +16,8 @@ use crate::error::{Error, Result};
 pub struct TcpClientManager {
     /// Map of client socket addresses to TCP streams
     clients: Mutex<HashMap<SocketAddr, Arc<Mutex<TcpStream>>>>,
+    /// Number of active clients (cached to avoid locking for count)
+    client_count: std::sync::atomic::AtomicUsize,
 }
 
 impl TcpClientManager {
@@ -23,6 +25,7 @@ impl TcpClientManager {
     pub fn new() -> Self {
         Self {
             clients: Mutex::new(HashMap::new()),
+            client_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -31,6 +34,15 @@ impl TcpClientManager {
     /// This is useful for tracking clients before their streams are available.
     pub fn register_client(&self, addr: SocketAddr) {
         debug!("Client {} registered for future connection", addr);
+    }
+
+    /// Check if a client is connected
+    pub fn is_client_connected(&self, addr: &SocketAddr) -> bool {
+        let clients = match self.clients.lock() {
+            Ok(clients) => clients,
+            Err(_) => return false,
+        };
+        clients.contains_key(addr)
     }
 
     /// Add a new client with its stream
@@ -48,20 +60,38 @@ impl TcpClientManager {
             // Continue adding the client even if locking fails
         }
 
-        let mut clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
-        info!("Adding client {} to manager", addr);
-        clients.insert(addr, stream_arc);
-        info!("Total clients: {}", clients.len());
+        // 尽量减少锁的持有时间
+        let is_new_client = {
+            let mut clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
+            info!("Adding client {} to manager", addr);
+            let is_new = !clients.contains_key(&addr);
+            clients.insert(addr, stream_arc);
+            is_new
+        };
+
+        // 如果是新客户端，增加计数器
+        if is_new_client {
+            let count = self.client_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            debug!("Total clients: {}", count);
+        }
         Ok(())
     }
 
     /// Remove a client
     pub fn remove_client(&self, addr: &SocketAddr) -> Result<()> {
-        let mut clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
-        if clients.remove(addr).is_some() {
+        // 尽量减少锁的持有时间
+        let removed = {
+            let mut clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
+            clients.remove(addr).is_some()
+        };
+
+        // 只在实际移除客户端时更新计数
+        if removed {
             info!("Removed client {}", addr);
-            info!("Total clients: {}", clients.len());
+            let count = self.client_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1;
+            debug!("Total clients: {}", count);
         }
+
         Ok(())
     }
 
@@ -143,9 +173,24 @@ impl TcpClientManager {
     }
 
     /// Get the number of connected clients
+    /// Uses atomic counter for better performance
     pub fn client_count(&self) -> Result<usize> {
-        let clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
-        Ok(clients.len())
+        // 尝试使用原子计数器
+        let count = self.client_count.load(std::sync::atomic::Ordering::Relaxed);
+
+        // 如果需要精确值，可以锁定并计数
+        if count == 0 {
+            // 可能是计数器不准确，直接计算实际客户端数量
+            let clients = self.clients.lock().map_err(|_| Error::ClientError("Failed to lock clients map".to_string()))?;
+            let actual_count = clients.len();
+
+            // 更新计数器
+            self.client_count.store(actual_count, std::sync::atomic::Ordering::Relaxed);
+
+            Ok(actual_count)
+        } else {
+            Ok(count)
+        }
     }
 }
 

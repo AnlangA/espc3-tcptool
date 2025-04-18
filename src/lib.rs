@@ -14,7 +14,7 @@ pub mod wifi;
 // Re-export public interfaces for easier access from crate root
 pub use config::{AppConfig, create_config};
 pub use error::{Error, Result};
-pub use tcp_client_manager::{TcpClientManager, create_tcp_client_manager};
-pub use tcp_server::{TcpServer, run_tcp_server};
-pub use uart::{UartManager, initialize_uart_forwarding};
-pub use wifi::{WiFiManager, configure_wifi_mixed_mode};
+pub use tcp_client_manager::TcpClientManager;
+pub use tcp_server::TcpServer;
+pub use uart::UartManager;
+pub use wifi::WiFiManager;
