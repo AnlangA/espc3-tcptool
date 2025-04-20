@@ -6,7 +6,7 @@
 //! It also supports command processing for controlling UART settings, such as changing
 //! the baud rate via TCP client commands.
 
-use log::{info, error, debug, trace};
+use log::{debug, error, info, trace};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -70,7 +70,7 @@ impl TcpServer {
         data: &[u8],
         uart_manager: &Arc<UartManager>,
         stream_arc: &Arc<Mutex<TcpStream>>,
-        peer_addr: &std::net::SocketAddr
+        peer_addr: &std::net::SocketAddr,
     ) -> Result<()> {
         // 将命令转换为字符串
         let cmd_str = match std::str::from_utf8(data) {
@@ -79,7 +79,9 @@ impl TcpServer {
                 // 发送错误响应
                 let response = "ERROR: Invalid command format (not UTF-8)\r\n";
                 Self::send_response(stream_arc, response, peer_addr)?;
-                return Err(Error::TcpError("Invalid command format (not UTF-8)".to_string()));
+                return Err(Error::TcpError(
+                    "Invalid command format (not UTF-8)".to_string(),
+                ));
             }
         };
 
@@ -102,26 +104,38 @@ impl TcpServer {
                             // 发送成功响应
                             let response = format!("OK: Baudrate changed to {}\r\n", baudrate);
                             if let Err(e) = Self::send_response(stream_arc, &response, peer_addr) {
-                                error!("Failed to send baudrate change response to client {}: {}", peer_addr, e);
+                                error!(
+                                    "Failed to send baudrate change response to client {}: {}",
+                                    peer_addr, e
+                                );
                                 return Err(e);
                             }
-                            info!("Successfully changed baudrate to {} for client {}", baudrate, peer_addr);
-                        },
+                            info!(
+                                "Successfully changed baudrate to {} for client {}",
+                                baudrate, peer_addr
+                            );
+                        }
                         Err(e) => {
                             // 发送错误响应
                             let response = format!("ERROR: Failed to set baudrate: {}\r\n", e);
                             if let Err(e) = Self::send_response(stream_arc, &response, peer_addr) {
-                                error!("Failed to send baudrate error response to client {}: {}", peer_addr, e);
+                                error!(
+                                    "Failed to send baudrate error response to client {}: {}",
+                                    peer_addr, e
+                                );
                                 return Err(e);
                             }
                         }
                     }
-                },
+                }
                 Err(_) => {
                     // 波特率解析失败
                     let response = format!("ERROR: Invalid baudrate value: {}\r\n", baud_str);
                     if let Err(e) = Self::send_response(stream_arc, &response, peer_addr) {
-                        error!("Failed to send invalid baudrate response to client {}: {}", peer_addr, e);
+                        error!(
+                            "Failed to send invalid baudrate response to client {}: {}",
+                            peer_addr, e
+                        );
                         return Err(e);
                     }
                 }
@@ -138,10 +152,16 @@ impl TcpServer {
             let current_baudrate = uart_manager.as_ref().get_baudrate();
             let response = format!("Current baudrate: {}\r\n", current_baudrate);
             if let Err(e) = Self::send_response(stream_arc, &response, peer_addr) {
-                error!("Failed to send baudrate query response to client {}: {}", peer_addr, e);
+                error!(
+                    "Failed to send baudrate query response to client {}: {}",
+                    peer_addr, e
+                );
                 return Err(e);
             }
-            info!("Successfully sent current baudrate {} to client {}", current_baudrate, peer_addr);
+            info!(
+                "Successfully sent current baudrate {} to client {}",
+                current_baudrate, peer_addr
+            );
         }
         // 处理帮助命令
         else if cmd_str.starts_with("AT+HELP") {
@@ -168,14 +188,26 @@ impl TcpServer {
             // 等待一小段时间，确保客户端准备好接收数据
             thread::sleep(Duration::from_millis(20));
 
-            info!("Processing unknown command '{}' from client {}", cmd_str, peer_addr);
+            info!(
+                "Processing unknown command '{}' from client {}",
+                cmd_str, peer_addr
+            );
 
-            let response = format!("ERROR: Unknown command: {}\r\nType AT+HELP for available commands\r\n", cmd_str);
+            let response = format!(
+                "ERROR: Unknown command: {}\r\nType AT+HELP for available commands\r\n",
+                cmd_str
+            );
             if let Err(e) = Self::send_response(stream_arc, &response, peer_addr) {
-                error!("Failed to send unknown command response to client {}: {}", peer_addr, e);
+                error!(
+                    "Failed to send unknown command response to client {}: {}",
+                    peer_addr, e
+                );
                 return Err(e);
             }
-            info!("Successfully sent unknown command response to client {}", peer_addr);
+            info!(
+                "Successfully sent unknown command response to client {}",
+                peer_addr
+            );
         }
 
         Ok(())
@@ -185,12 +217,17 @@ impl TcpServer {
     fn send_response(
         stream_arc: &Arc<Mutex<TcpStream>>,
         response: &str,
-        peer_addr: &std::net::SocketAddr
+        peer_addr: &std::net::SocketAddr,
     ) -> Result<()> {
         // 尝试获取流锁
         let mut stream = match stream_arc.lock() {
             Ok(guard) => guard,
-            Err(_) => return Err(Error::TcpError(format!("Failed to lock stream for client {}", peer_addr))),
+            Err(_) => {
+                return Err(Error::TcpError(format!(
+                    "Failed to lock stream for client {}",
+                    peer_addr
+                )))
+            }
         };
 
         // 尝试将流设置为阻塞模式，以确保数据发送完成
@@ -202,7 +239,10 @@ impl TcpServer {
                 // 立即刷新数据，确保数据被发送
                 if let Err(e) = stream.flush() {
                     error!("Failed to flush response to client {}: {}", peer_addr, e);
-                    return Err(Error::TcpError(format!("Failed to flush response to client {}: {}", peer_addr, e)));
+                    return Err(Error::TcpError(format!(
+                        "Failed to flush response to client {}: {}",
+                        peer_addr, e
+                    )));
                 }
 
                 // 恢复非阻塞模式
@@ -210,10 +250,13 @@ impl TcpServer {
 
                 info!("Sent response to client {}: {}", peer_addr, response.trim());
                 Ok(())
-            },
+            }
             Err(e) => {
                 error!("Failed to send response to client {}: {}", peer_addr, e);
-                Err(Error::TcpError(format!("Failed to send response to client {}: {}", peer_addr, e)))
+                Err(Error::TcpError(format!(
+                    "Failed to send response to client {}: {}",
+                    peer_addr, e
+                )))
             }
         }
     }
@@ -231,7 +274,7 @@ impl TcpServer {
             Ok(l) => {
                 info!("Successfully bound to {}", bind_address);
                 l
-            },
+            }
             Err(e) => {
                 // 如果绑定失败，尝试备选地址
                 error!("Failed to bind to {}: {}", bind_address, e);
@@ -242,19 +285,32 @@ impl TcpServer {
 
                 match TcpListener::bind(&alt_bind_address) {
                     Ok(l) => {
-                        info!("Successfully bound to alternative address: {}", alt_bind_address);
+                        info!(
+                            "Successfully bound to alternative address: {}",
+                            alt_bind_address
+                        );
                         l
-                    },
+                    }
                     Err(e2) => {
                         // 如果备选地址也失败，尝试使用不同端口
-                        error!("Failed to bind to alternative address {}: {}", alt_bind_address, e2);
+                        error!(
+                            "Failed to bind to alternative address {}: {}",
+                            alt_bind_address, e2
+                        );
 
                         let fallback_port = self.config.port + 1;
                         let fallback_address = format!("0.0.0.0:{}", fallback_port);
-                        info!("Trying fallback address with different port: {}", fallback_address);
+                        info!(
+                            "Trying fallback address with different port: {}",
+                            fallback_address
+                        );
 
-                        TcpListener::bind(&fallback_address)
-                            .map_err(|e3| Error::TcpError(format!("Failed to bind to any address: {}, {}, {}", e, e2, e3)))?
+                        TcpListener::bind(&fallback_address).map_err(|e3| {
+                            Error::TcpError(format!(
+                                "Failed to bind to any address: {}, {}, {}",
+                                e, e2, e3
+                            ))
+                        })?
                     }
                 }
             }
@@ -281,7 +337,15 @@ impl TcpServer {
 
                     // Handle each client in a new thread
                     thread::spawn(move || {
-                        if let Err(e) = Self::handle_client(stream, client_manager, uart_manager, buffer_size) {
+                        unsafe {
+                            esp_idf_sys::vTaskPrioritySet(
+                                esp_idf_sys::xTaskGetCurrentTaskHandle(),
+                                23, // 优先级范围通常是 0-24，数字越大优先级越高
+                            );
+                        }
+                        if let Err(e) =
+                            Self::handle_client(stream, client_manager, uart_manager, buffer_size)
+                        {
                             error!("Error handling client: {}", e);
                         }
                     });
@@ -314,14 +378,18 @@ impl TcpServer {
         let mut client_data = ClientData {
             last_interaction: std::time::Instant::now(),
         };
-        let peer_addr = stream.peer_addr()
+        let peer_addr = stream
+            .peer_addr()
             .map_err(|e| Error::TcpError(format!("Failed to get peer address: {}", e)))?;
 
         info!("New client connected: {}", peer_addr);
 
         // 检查客户端是否已经连接
         if client_manager.is_client_connected(&peer_addr) {
-            info!("Client {} is already connected, updating connection", peer_addr);
+            info!(
+                "Client {} is already connected, updating connection",
+                peer_addr
+            );
         } else {
             // 注册客户端地址
             client_manager.register_client(peer_addr);
@@ -336,12 +404,16 @@ impl TcpServer {
         debug!("Added client stream to manager for {}", peer_addr);
 
         // Get the stream lock for setting options
-        let stream_guard = stream_arc.lock()
+        let stream_guard = stream_arc
+            .lock()
             .map_err(|_| Error::TcpError("Failed to lock stream".to_string()))?;
 
         // Set non-blocking mode so we don't block if there's no data
         if let Err(e) = stream_guard.set_nonblocking(true) {
-            error!("Failed to set non-blocking mode for client {}: {}", peer_addr, e);
+            error!(
+                "Failed to set non-blocking mode for client {}: {}",
+                peer_addr, e
+            );
             // Continue even if setting the mode fails
         }
 
@@ -375,19 +447,24 @@ impl TcpServer {
                 Ok(_) => {
                     // 立即刷新数据，确保数据被发送
                     if let Err(e) = stream.flush() {
-                        error!("Failed to flush welcome message to client {}: {}", peer_addr, e);
+                        error!(
+                            "Failed to flush welcome message to client {}: {}",
+                            peer_addr, e
+                        );
                     } else {
                         info!("Sent welcome message to client {}", peer_addr);
                     }
-                },
+                }
                 Err(e) => {
-                    error!("Failed to send welcome message to client {}: {}", peer_addr, e);
+                    error!(
+                        "Failed to send welcome message to client {}: {}",
+                        peer_addr, e
+                    );
                 }
             }
         }
-        
-        loop {
 
+        loop {
             // 获取流锁进行读取
             let mut stream = match stream_arc.lock() {
                 Ok(guard) => guard,
@@ -415,10 +492,14 @@ impl TcpServer {
 
                         // 使用trace级别记录详细日志，减少日志开销
                         if log::log_enabled!(log::Level::Trace) {
-                            let hex_str: String = buffer[0..n].iter()
-                                .map(|b| format!("{:02X} ", b))
-                                .collect();
-                            trace!("TCP -> UART: {} bytes from {} (hex): {}", n, peer_addr, hex_str);
+                            let hex_str: String =
+                                buffer[0..n].iter().map(|b| format!("{:02X} ", b)).collect();
+                            trace!(
+                                "TCP -> UART: {} bytes from {} (hex): {}",
+                                n,
+                                peer_addr,
+                                hex_str
+                            );
                         } else {
                             debug!("TCP -> UART: {} bytes from {}", n, peer_addr);
                         }
@@ -432,7 +513,12 @@ impl TcpServer {
                             thread::sleep(Duration::from_millis(10));
 
                             // 处理命令
-                            if let Err(e) = Self::process_command(&buffer[0..n], &uart_manager, &stream_arc, &peer_addr) {
+                            if let Err(e) = Self::process_command(
+                                &buffer[0..n],
+                                &uart_manager,
+                                &stream_arc,
+                                &peer_addr,
+                            ) {
                                 error!("Error processing command from client {}: {}", peer_addr, e);
                             }
                         } else {
@@ -461,6 +547,7 @@ impl TcpServer {
                     }
                 }
             }
+            thread::sleep(Duration::from_millis(2));
         }
 
         Ok(())
@@ -470,7 +557,10 @@ impl TcpServer {
 /// Run a TCP server with the given client manager and UART manager
 ///
 /// This is a convenience function for backward compatibility
-pub fn run_tcp_server(client_manager: Arc<TcpClientManager>, uart_manager: Arc<UartManager>) -> anyhow::Result<()> {
+pub fn run_tcp_server(
+    client_manager: Arc<TcpClientManager>,
+    uart_manager: Arc<UartManager>,
+) -> anyhow::Result<()> {
     // Create a TCP server with default configuration
     let config = crate::config::TcpServerConfig::default();
     let server = TcpServer::new(config, client_manager, uart_manager);

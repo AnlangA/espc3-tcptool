@@ -256,12 +256,17 @@ impl UartManager {
         let uart_manager = Arc::clone(&self_arc);
         let config = uart_manager.config.clone();
 
-        // 使用高优先级线程处理UART数据
         let builder = thread::Builder::new()
             .name("uart_forwarding".into())
             .stack_size(4096); // 指定足够的栈大小
 
         builder.spawn(move || {
+            unsafe {
+                esp_idf_sys::vTaskPrioritySet(
+                    esp_idf_sys::xTaskGetCurrentTaskHandle(),
+                    24       // 使用高优先级线程处理UART数据 // 优先级范围通常是 0-24，数字越大优先级越高
+                );
+            }
             // 预分配缓冲区以避免运行时分配
             let mut buffer = vec![0u8; config.buffer_size];
             let poll_interval = Duration::from_millis(config.poll_interval_ms);
